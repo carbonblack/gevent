@@ -178,9 +178,21 @@ class Resolver(object):
         ares = self.ares
 
         if family == AF_UNSPEC:
-            ares_values = Values(self.hub, 2)
-            ares.gethostbyname(ares_values, host, AF_INET)
-            ares.gethostbyname(ares_values, host, AF_INET6)
+            # Because there is no plug into ares.gethostbyname_file ares lib function,
+            # we must call gethostbyname with IPv4 first and then IPv6.  If the
+            # two are called simultaneously as before, and if a DNS server is down, and
+            # even if the IPv4 address is in hosts file, it will wait for IPv6 to hit
+            # missing/invalid DNS server which will cause a huge wait.
+            # This change has the benefit of returning immediately if IPv4 address is in
+            # hosts file but drawback of waiting for IPv4 to miss hosts file lookup AND
+            # missing DNS hit before looking at IPv6 if IPv4 address is not defined in hosts
+            # file.  This all can be better solved by looking in the hosts file for IPv4 and
+            # and v6 first before attempting to look into DNS servers.
+            values = Values(self.hub, 1)
+            ares.gethostbyname(values, host, AF_INET)
+            if not len(values.get(throw_on_error=False)):
+                values = Values(self.hub, 1)
+                ares.gethostbyname(values, host, AF_INET6)
         elif family == AF_INET:
             ares_values = Values(self.hub, 1)
             ares.gethostbyname(ares_values, host, AF_INET)
@@ -334,13 +346,14 @@ class Values(object):
     # helper to collect multiple values; ignore errors unless nothing has succeeded
     # QQQ could probably be moved somewhere - hub.py?
 
-    __slots__ = ['count', 'values', 'error', 'waiter']
+    __slots__ = ['count', 'values', 'error', 'waiter', '_synced']
 
     def __init__(self, hub, count):
         self.count = count
         self.values = []
         self.error = None
         self.waiter = Waiter(hub)
+        self._synced = False
 
     def __call__(self, source):
         self.count -= 1
@@ -351,9 +364,11 @@ class Values(object):
         if self.count <= 0:
             self.waiter.switch()
 
-    def get(self):
-        self.waiter.get()
-        if self.values:
+    def get(self, throw_on_error=True):
+        if not self._synced:
+            self.waiter.get()
+            self._synced = True
+        if self.values or not throw_on_error:
             return self.values
         else:
             assert error is not None
